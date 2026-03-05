@@ -172,7 +172,7 @@ int clickandctrlv() {
 }
 
 int main() {
-    cout << "请支持作者 Midairlogn ：https://github.com/midairlogn" << endl << endl;
+    cout << "作者 Midairlogn ：https://github.com/midairlogn" << endl << endl;
 	copymessage();
 	//控制输入的次数
 	int sendtimes;

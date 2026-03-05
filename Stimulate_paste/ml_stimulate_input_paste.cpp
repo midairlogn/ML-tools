@@ -403,6 +403,8 @@ int main() {
                   << GetLastError() << std::endl;
     }
 
+    std::cout << "Author: Midairlogn (https://github.com/midairlogn)" << std::endl << std::endl;
+
     std::cout << "Copy the text you want to paste, then press Enter." << std::endl;
     WaitForEnter();
     std::cout << std::endl;

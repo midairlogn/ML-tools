@@ -211,7 +211,7 @@ int send_message() {
 
 int main() {
 	startagain:
-    cout << "请支持作者 Midairlogn ：https://github.com/midairlogn" << endl << endl;
+    cout << "作者 Midairlogn ：https://github.com/midairlogn" << endl << endl;
     setsleeptime();
     setgaptime();
 
