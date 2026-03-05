@@ -85,7 +85,7 @@ int get_message(){
     return 0;
 }
 
-int wait(){
+void wait(){
 	int seconds;
 
   	// 获取用户输入的秒数
@@ -152,7 +152,7 @@ int getmouse2() {
     return 0;
 }
 
-int move_back(){
+void move_back(){
     // 将鼠标移动到目标点
     //SetCursorPos(x2, y2);
     SetCursorPos(cursorPos2.x, cursorPos2.y);
