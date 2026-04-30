@@ -14,6 +14,10 @@
 
 一个基于 Tampermonkey 的油猴脚本，用于自动提取中国大学慕课 ( icourse163.org ) 页面的题目信息并调用AI接口辅助作答。
 
+### [中国大学慕课文件批量下载助手](/ML-Icourse163_Downloader/)
+
+一个用于中国大学 MOOC (icourse163.org) 的批量下载工具，以 Tampermonkey 用户脚本形式实现。
+
 ### [ChatBomb](/ChatBomb/)
 
 `QQ/TIM/微信/Discord` 等聊天软件的刷屏工具。
