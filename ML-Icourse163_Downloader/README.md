@@ -38,7 +38,7 @@
 
 ## 使用方法
 
-1. 访问中国大学 MOOC 课程页面 (www.icourse163.org/learn/* 或 www.icourse163.org/spoc/learn/*)
+1. 访问中国大学 MOOC 课程页面
 2. 页面右下角会出现 "MOOC下载" 悬浮按钮
 3. 点击按钮展开菜单：
    - **批量下载**：开始下载已配置的内容
