@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name              ML - Icourse163 Downloader
 // @namespace         http://tampermonkey.net/
-// @version           3.4
+// @version           3.5
 // @description       在中国大学 MOOC 的课程学习页面添加批量下载按钮，方便将文档、视频下载到本地学习。默认仅下载文档，可按需勾选下载视频。以悬浮按钮形式呈现。
 // @description:en    add download button on icourse163.org to download documents and videos. By default, only documents are downloaded. Presented as a floating button.
 // @author            Midairlogn
@@ -23,7 +23,7 @@
     'use strict';
     var $ = $ || window.$;
     var log_count = 1;
-    var global_download_videos = true; // 设置是否显示下载视频的选项。设为true，显示下载视频的配置，按配置决定是否下载视频、清晰度与格式；设为false，不显示下载视频的设置，不下载视频。
+    var global_download_videos = false; // 设置是否显示下载视频的选项。设为true，显示下载视频的配置，按配置决定是否下载视频、清晰度与格式；设为false，不显示下载视频的设置，不下载视频。
     var golbal_debug_mode = false; // 设置是否为调试模式。True: 不向Aria2发送下载命令；False: 正常发送。
 
     // --- 用户可配置项 (通过设置界面修改) ---
@@ -31,8 +31,7 @@
     var course_save_path = ''; // 课程保存路径 (例如: /Users/mofiter/Downloads/icourse163)
     var download_documents_enabled = true; // 是否下载文档 (PDF)
     var download_videos_enabled = false; // 是否下载视频 (默认不下载)
-    var video_quality = 2; // 视频清晰度: 2=高清 (HD), 1=标清 (SD) (对应 Python 脚本中的 mode: IS_SHD=3, IS_HD=2, IS_SD=1)
-    var video_format = 'mp4'; // 视频格式: 'mp4' 或 'flv'
+    var video_quality = 2; // 视频清晰度: 2=高清 (HD), 1=标清 (SD)
     // --- 用户可配置项结束 ---
 
     var course_info = {'course_id': null,'course_name': '','chapter_info': []}; // 课程信息结构
@@ -194,7 +193,6 @@
         download_documents_enabled = GM_getValue('download_documents_enabled', true); // 默认下载文档
         download_videos_enabled = GM_getValue('download_videos_enabled', false); // 默认不下载视频
         video_quality = GM_getValue('video_quality', 2); // 默认高清
-        video_format = GM_getValue('video_format', 'mp4'); // 默认mp4
     }
 
     // 打开设置界面
@@ -226,11 +224,8 @@
             // 视频清晰度和格式设置仅在 global_download_videos 为 true 时显示
             (global_download_videos ?
                 "<li style='margin-bottom:10px;font-weight:bold;'>视频清晰度：</li>\n" +
-                "<li style='margin-bottom:15px;'><label title='高清' style='margin-right:15px;'><input id='video-quality-2' name='video-quality' value='2' type='radio' style='margin:0 5px;vertical-align:middle;'" + (video_quality==2 ? "checked":"") + "></input>高清</label>\n" +
-                "<label title='标清'><input id='video-quality-1' name='video-quality' value='1' type='radio' style='margin:0 5px;vertical-align:middle;'" + (video_quality==1 ? "checked":"") + "></input>标清</label></li>\n" +
-                "<li style='margin-bottom:10px;font-weight:bold;'>视频格式：</li>\n" +
-                "<li style='margin-bottom:20px;'><label title='mp4' style='margin-right:15px;'><input id='video-format-mp4' name='video-format' value='mp4' type='radio' style='margin:0 5px;vertical-align:middle;'" + (video_format=='mp4' ? "checked":"") + "></input>mp4</label>" +
-                "<label title='flv'><input id='video-format-flv' name='video-format' value='flv' type='radio' style='margin:0 5px;vertical-align:middle;'" + (video_format=='flv' ? "checked":"") + "></input>flv</label></li>\n"
+                "<li style='margin-bottom:20px;'><label title='高清' style='margin-right:15px;'><input id='video-quality-2' name='video-quality' value='2' type='radio' style='margin:0 5px;vertical-align:middle;'" + (video_quality==2 ? "checked":"") + "></input>高清</label>\n" +
+                "<label title='标清'><input id='video-quality-1' name='video-quality' value='1' type='radio' style='margin:0 5px;vertical-align:middle;'" + (video_quality==1 ? "checked":"") + "></input>标清</label></li>\n"
                 : ""
             ) +
             "</ul>\n" +
@@ -251,7 +246,6 @@
                 if(global_download_videos){
                     GM_setValue('download_videos_enabled',$('#download-videos').prop('checked'));
                     GM_setValue('video_quality',parseInt($('input[name="video-quality"]:checked').val()));
-                    GM_setValue('video_format',$('input[name="video-format"]:checked').val());
                 }
                 loadSetting(); // 重新加载设置到变量
                 $settingPanel.hide();
@@ -269,7 +263,6 @@
             if(global_download_videos){
                 $('#download-videos').prop('checked', download_videos_enabled);
                 $('input[name="video-quality"][value="' + video_quality + '"]').prop('checked', true);
-                $('input[name="video-format"][value="' + video_format + '"]').prop('checked', true);
             }
             $settingPanel.show();
         }
@@ -467,10 +460,16 @@
             }
             mylog(`步骤3完成: 获取到视频 URL=${videoUrl.substring(0, 80)}...`);
 
-            // 发送下载任务到 Aria2
-            const final_ext = videoUrl.includes('.m3u8') ? 'm3u8' : video_format;
-            const final_file_name = file_base_name + '.' + final_ext;
-            sendDownloadTaskToAria2(videoUrl, final_file_name, save_dir);
+            // 保存视频文件
+            if (videoUrl.includes('.m3u8')) {
+                // HLS 流: 修复 m3u8 中的相对路径并保存，可用 VLC 等播放器打开
+                await downloadHlsStream(videoUrl, file_base_name, save_dir);
+            } else {
+                // 直接下载 mp4/flv 文件到 Aria2
+                const final_ext = videoUrl.includes('.mp4') ? 'mp4' : videoUrl.includes('.flv') ? 'flv' : 'mp4';
+                const final_file_name = file_base_name + '.' + final_ext;
+                sendDownloadTaskToAria2(videoUrl, final_file_name, save_dir);
+            }
             mylog(`视频 ${file_base_name} 的下载任务已发送: ${videoUrl}`);
             return Promise.resolve();
 
@@ -636,6 +635,81 @@
                 onerror: function(error) {
                     mylog('VOD API 网络错误:', error);
                     resolve(null);
+                }
+            });
+        });
+    }
+
+    /**
+     * 解析 HLS m3u8 流，将相对路径替换为绝对路径后保存
+     * 这样生成的 m3u8 文件可被 VLC 等播放器直接打开播放
+     */
+    function downloadHlsStream(m3u8Url, file_base_name, save_dir) {
+        return new Promise((resolve, reject) => {
+            mylog(`正在解析 HLS m3u8: ${m3u8Url}`);
+
+            GM_xmlhttpRequest({
+                url: m3u8Url,
+                method: 'GET',
+                headers: {
+                    'Referer': 'https://www.icourse163.org/',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36'
+                },
+                responseType: 'text',
+                onload: function(response) {
+                    if (response.status !== 200) {
+                        mylog(`m3u8 请求失败: HTTP ${response.status}`);
+                        reject(`m3u8 请求失败: ${response.status}`);
+                        return;
+                    }
+
+                    const m3u8Content = response.responseText;
+                    // 提取基础路径和查询参数（?ak=... 需要附加到 .ts 分片 URL 上）
+                    const urlParts = m3u8Url.split('?');
+                    const baseUrl = urlParts[0].substring(0, urlParts[0].lastIndexOf('/') + 1);
+                    const queryString = urlParts[1] ? '?' + urlParts[1] : '';
+
+                    // 将相对路径替换为绝对路径，并附加查询参数
+                    const fixedContent = m3u8Content.split('\n').map(line => {
+                        const trimmed = line.trim();
+                        // 跳过注释、空行和已经是绝对URL的行
+                        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+                            return line;
+                        }
+                        // 相对路径 -> 绝对路径 + 查询参数
+                        return baseUrl + trimmed + queryString;
+                    }).join('\n');
+
+                    // 保存修复后的 m3u8 文件
+                    const final_file_name = file_base_name + '.m3u8';
+
+                    // 使用 Blob + 下载链接保存文件
+                    try {
+                        const blob = new Blob([fixedContent], { type: 'application/vnd.apple.mpegurl' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = final_file_name;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                        mylog(`m3u8 文件已保存: ${final_file_name} (可用 VLC 等播放器打开)`);
+                    } catch (e) {
+                        // GM_download 作为备选方案
+                        mylog('Blob 保存失败，尝试 GM_download:', e);
+                        GM_download({
+                            url: 'data:application/vnd.apple.mpegurl;charset=utf-8,' + encodeURIComponent(fixedContent),
+                            name: final_file_name,
+                            saveAs: true
+                        });
+                    }
+
+                    resolve();
+                },
+                onerror: function(error) {
+                    mylog('m3u8 请求网络错误:', error);
+                    reject(`m3u8 请求网络错误: ${error}`);
                 }
             });
         });
