@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name              ML - Icourse163 Downloader
 // @namespace         http://tampermonkey.net/
-// @version           3.3
+// @version           3.4
 // @description       在中国大学 MOOC 的课程学习页面添加批量下载按钮，方便将文档、视频下载到本地学习。默认仅下载文档，可按需勾选下载视频。以悬浮按钮形式呈现。
 // @description:en    add download button on icourse163.org to download documents and videos. By default, only documents are downloaded. Presented as a floating button.
 // @author            Midairlogn
@@ -23,7 +23,7 @@
     'use strict';
     var $ = $ || window.$;
     var log_count = 1;
-    var global_download_videos = false; // 设置是否显示下载视频的选项。设为true，显示下载视频的配置，按配置决定是否下载视频、清晰度与格式；设为false，不显示下载视频的设置，不下载视频。
+    var global_download_videos = true; // 设置是否显示下载视频的选项。设为true，显示下载视频的配置，按配置决定是否下载视频、清晰度与格式；设为false，不显示下载视频的设置，不下载视频。
     var golbal_debug_mode = false; // 设置是否为调试模式。True: 不向Aria2发送下载命令；False: 正常发送。
 
     // --- 用户可配置项 (通过设置界面修改) ---
@@ -428,8 +428,10 @@
     }
 
     /**
-     * 新增函数：通过 DWR 接口获取视频的真实下载链接并发送到Aria2
-     * 对应 Python 脚本中的 _get_source_text 和 _get_video_url 方法
+     * 通过三步流程获取视频下载链接并发送到Aria2:
+     * 1. DWR 接口获取 videoId
+     * 2. getResourceTokenV2.rpc 获取签名 (使用 window.tokenEncrypt)
+     * 3. VOD API 获取实际视频 URL (m3u8 格式)
      */
     async function fetchVideoUrlAndDownloadDWR(section, save_dir, file_base_name) {
         const contentId = section.content_id;
@@ -441,15 +443,54 @@
             return Promise.resolve();
         }
 
+        mylog(`正在获取视频 ${file_base_name} 的下载链接 (contentId: ${contentId}, sectionId: ${sectionId})...`);
+
+        try {
+            // === 步骤1: 通过 DWR 获取 videoId ===
+            const videoId = await getVideoIdFromDWR(contentId, contentType, sectionId);
+            if (!videoId) {
+                throw new Error('DWR 响应中未找到 videoId');
+            }
+            mylog(`步骤1完成: 获取到 videoId=${videoId}`);
+
+            // === 步骤2: 通过 getResourceTokenV2 获取签名 ===
+            const signature = await getVideoSignature(sectionId, contentType);
+            if (!signature) {
+                throw new Error('获取视频签名失败');
+            }
+            mylog(`步骤2完成: 获取到 signature=${signature.substring(0, 20)}...`);
+
+            // === 步骤3: 通过 VOD API 获取视频 URL ===
+            const videoUrl = await getVideoUrlFromVOD(videoId, signature);
+            if (!videoUrl) {
+                throw new Error('VOD API 未返回有效视频 URL');
+            }
+            mylog(`步骤3完成: 获取到视频 URL=${videoUrl.substring(0, 80)}...`);
+
+            // 发送下载任务到 Aria2
+            const final_ext = videoUrl.includes('.m3u8') ? 'm3u8' : video_format;
+            const final_file_name = file_base_name + '.' + final_ext;
+            sendDownloadTaskToAria2(videoUrl, final_file_name, save_dir);
+            mylog(`视频 ${file_base_name} 的下载任务已发送: ${videoUrl}`);
+            return Promise.resolve();
+
+        } catch (error) {
+            mylog(`获取视频 ${file_base_name} 下载链接失败:`, error);
+            return Promise.reject(error);
+        }
+    }
+
+    /**
+     * 步骤1: 通过 DWR 接口获取 videoId
+     */
+    function getVideoIdFromDWR(contentId, contentType, sectionId) {
         const parse_url = 'https://www.icourse163.org/dwr/call/plaincall/CourseBean.getLessonUnitLearnVo.dwr';
         const scriptSessionIdPlaceholder = '${scriptSessionId}190';
-        const batchId = '1543633161622';
+        const batchId = Date.now().toString();
 
         const post_data = `callCount=1&scriptSessionId=${scriptSessionIdPlaceholder}&c0-scriptName=CourseBean&c0-methodName=getLessonUnitLearnVo&httpSessionId=${csrfToken}&c0-id=0&c0-param0=number:${contentId}&c0-param1=number:${contentType}&c0-param2=number:0&c0-param3=number:${sectionId}&batchId=${batchId}`;
 
         return new Promise((resolve, reject) => {
-            mylog(`正在通过 DWR 获取视频 ${file_base_name} 的真实视频链接 (contentId: ${contentId}, sectionId: ${sectionId})...`);
-
             GM_xmlhttpRequest({
                 url: parse_url,
                 method: 'POST',
@@ -463,63 +504,138 @@
                 data: post_data,
                 responseType: 'text',
                 onload: function(response) {
-                    // console.log("DWR 响应纯文本: ", response);
                     if (response.status === 200) {
                         const text = response.responseText;
-                        let videoUrl = null;
-                        let final_ext = video_format; // 默认使用用户选择的格式
-
-                        // 优先顺序: Shd (超清), Hd (高清), Sd (标清)
-                        const resolutions = ['Shd', 'Hd', 'Sd'];
-                        // Python 脚本中 mode: IS_SHD=3, IS_HD=2, IS_SD=1
-                        // JS 脚本中 video_quality: 2=高清, 1=标清
-                        // 映射关系：
-                        // video_quality=2 (高清) -> 优先 Hd，其次 Sd (如果Hd没有)
-                        // video_quality=1 (标清) -> 优先 Sd
-
-                        let selectedQualityIndex = 0; // 默认Shd (最高画质)
-                        if (video_quality === 2) { // 用户选择高清
-                            selectedQualityIndex = 1; // 从Hd开始找
-                        } else if (video_quality === 1) { // 用户选择标清
-                            selectedQualityIndex = 2; // 从Sd开始找
-                        }
-
-                        for (let i = selectedQualityIndex; i < resolutions.length; i++) {
-                            const res = resolutions[i];
-                            // 尝试匹配用户选择的格式
-                            const videoMatch = text.match(new RegExp(`(?<ext>${video_format})${res}Url="(?<url>.*?\\.${video_format}.*?)"`));
-                            if (videoMatch && videoMatch.groups && videoMatch.groups.url) {
-                                videoUrl = videoMatch.groups.url;
-                                final_ext = video_format; // 确认扩展名
-                                break;
-                            }
-                            // 如果用户选择的格式没有，尝试匹配另一个格式
-                            const otherFormat = (video_format === 'mp4' ? 'flv' : 'mp4');
-                            const otherVideoMatch = text.match(new RegExp(`(?<ext>${otherFormat})${res}Url="(?<url>.*?\\.${otherFormat}.*?)"`));
-                            if (otherVideoMatch && otherVideoMatch.groups && otherVideoMatch.groups.url) {
-                                videoUrl = otherVideoMatch.groups.url;
-                                final_ext = otherFormat; // 确认扩展名
-                                break;
-                            }
-                        }
-
-                        if (videoUrl) {
-                            let final_file_name = file_base_name + '.' + final_ext;
-                            sendDownloadTaskToAria2(videoUrl, final_file_name, save_dir);
-                            mylog(`视频 ${file_base_name} 的真实视频链接已获取并发送下载任务: ${videoUrl}`);
-                            resolve();
+                        // DWR 响应格式: s0.videoId=1217411616 或 videoId:1217411616
+                        const match = text.match(/videoId[=:](\d+)/);
+                        if (match) {
+                            resolve(parseInt(match[1]));
                         } else {
-                            mylog(`视频 ${file_base_name} 的真实视频链接未在 DWR 响应中找到符合清晰度和格式的。响应数据:`, text);
-                            reject(`视频链接未找到: ${file_base_name}`);
+                            mylog('DWR 响应中未找到 videoId:', text.substring(0, 500));
+                            resolve(null);
                         }
                     } else {
-                        mylog(`获取视频 ${file_base_name} DWR 请求失败。HTTP状态: ${response.status}, 响应:`, response.responseText);
-                        reject(`获取视频 DWR 数据失败: ${file_base_name}`);
+                        mylog(`DWR 请求失败: HTTP ${response.status}`);
+                        resolve(null);
                     }
                 },
                 onerror: function(error) {
-                    mylog(`网络错误：获取视频 ${file_base_name} DWR 请求失败:`, error);
-                    reject(`网络错误获取视频 DWR 数据: ${file_base_name}`);
+                    mylog('DWR 请求网络错误:', error);
+                    resolve(null);
+                }
+            });
+        });
+    }
+
+    /**
+     * 步骤2: 通过 getResourceTokenV2 获取视频签名
+     * sign 由 window.tokenEncrypt(bizId, bizType, contentType, timestamp) 计算
+     */
+    function getVideoSignature(bizId, contentType) {
+        const timestamp = Date.now();
+
+        // 使用页面的 tokenEncrypt 函数计算 sign
+        let sign = '';
+        try {
+            if (unsafeWindow.tokenEncrypt) {
+                sign = unsafeWindow.tokenEncrypt(bizId, 1, contentType, timestamp);
+            } else if (window.tokenEncrypt) {
+                sign = window.tokenEncrypt(bizId, 1, contentType, timestamp);
+            } else {
+                throw new Error('tokenEncrypt 函数不可用');
+            }
+        } catch (e) {
+            mylog('tokenEncrypt 调用失败:', e);
+            return Promise.resolve(null);
+        }
+
+        const url = `https://www.icourse163.org/web/j/resourceRpcBean.getResourceTokenV2.rpc?csrfKey=${csrfToken}`;
+        const post_data = `bizId=${bizId}&bizType=1&contentType=${contentType}&sign=${sign}&timestamp=${timestamp}`;
+
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                url: url,
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Referer': 'https://www.icourse163.org/',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36'
+                },
+                data: post_data,
+                responseType: 'json',
+                onload: function(response) {
+                    if (response.status === 200 && response.response) {
+                        const data = response.response;
+                        if (data.code === 0 && data.result && data.result.videoSignDto) {
+                            resolve(data.result.videoSignDto.signature);
+                        } else {
+                            mylog('getResourceTokenV2 响应异常:', data);
+                            resolve(null);
+                        }
+                    } else {
+                        mylog(`getResourceTokenV2 请求失败: HTTP ${response.status}`);
+                        resolve(null);
+                    }
+                },
+                onerror: function(error) {
+                    mylog('getResourceTokenV2 网络错误:', error);
+                    resolve(null);
+                }
+            });
+        });
+    }
+
+    /**
+     * 步骤3: 通过 VOD API 获取实际视频 URL
+     */
+    function getVideoUrlFromVOD(videoId, signature) {
+        const url = `https://vod.study.163.com/eds/api/v1/vod/video?videoId=${videoId}&signature=${signature}&clientType=1`;
+
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                url: url,
+                method: 'GET',
+                headers: {
+                    'Referer': 'https://www.icourse163.org/',
+                    'Origin': 'https://www.icourse163.org',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36'
+                },
+                responseType: 'json',
+                onload: function(response) {
+                    if (response.status === 200 && response.response) {
+                        const data = response.response;
+                        if (data.code === 0 && data.result && data.result.videos) {
+                            const videos = data.result.videos;
+                            // 按清晰度排序: quality 2=高清, 1=标清
+                            // video_quality: 2=高清, 1=标清
+                            let selectedVideo = null;
+
+                            if (video_quality === 2) {
+                                // 优先选高清 (quality=2)
+                                selectedVideo = videos.find(v => v.quality === 2) || videos.find(v => v.quality === 1) || videos[0];
+                            } else {
+                                // 优先选标清 (quality=1)
+                                selectedVideo = videos.find(v => v.quality === 1) || videos.find(v => v.quality === 2) || videos[0];
+                            }
+
+                            if (selectedVideo && selectedVideo.videoUrl) {
+                                resolve(selectedVideo.videoUrl);
+                            } else {
+                                mylog('VOD API 未返回有效视频 URL:', data);
+                                resolve(null);
+                            }
+                        } else {
+                            mylog('VOD API 响应异常:', data);
+                            resolve(null);
+                        }
+                    } else {
+                        mylog(`VOD API 请求失败: HTTP ${response.status}`);
+                        resolve(null);
+                    }
+                },
+                onerror: function(error) {
+                    mylog('VOD API 网络错误:', error);
+                    resolve(null);
                 }
             });
         });
